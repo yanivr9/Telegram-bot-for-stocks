@@ -1,0 +1,7 @@
+yfinance==0.2.36
+pandas==2.2.0
+numpy==1.26.3
+scipy==1.11.4
+pyTelegramBotAPI==4.15.4
+Flask==3.0.0
+gunicorn==21.2.0
