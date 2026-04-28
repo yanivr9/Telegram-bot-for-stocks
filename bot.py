@@ -5,6 +5,7 @@ from scipy.signal import argrelextrema
 import telebot
 import os
 import threading
+import requests
 from flask import Flask
 
 # --- הגדרות אישיות (נמשכות כמשתני סביבה לאבטחה) ---
@@ -14,8 +15,6 @@ ALLOWED_CHAT_IDS = [chat_id.strip() for chat_id in allowed_chats_env.split(",") 
 
 if not BOT_TOKEN:
     print("⚠️ חסר משתנה סביבה: TELEGRAM_BOT_TOKEN")
-if not ALLOWED_CHAT_IDS:
-    print("⚠️ אזהרה: לא הוגדרו משתמשי טלגרם מורשים (ALLOWED_CHAT_IDS).")
 
 # --- הגדרות שרת (למניעת שינה) ---
 app = Flask(__name__)
@@ -92,11 +91,17 @@ def get_levels_with_hits(df):
 
 def analyze_ticker_text(ticker):
     try:
-        stock = yf.Ticker(ticker.upper())
+        # יצירת "תחפושת" לדפדפן כדי ש-Yahoo לא יחסום את שרת הענן
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+        })
+        
+        stock = yf.Ticker(ticker.upper(), session=session)
         df = stock.history(period="2y")
         
         if len(df) < 100:
-            return "❌ אין מספיק נתונים היסטוריים לניתוח מניה זו."
+            return f"❌ אין מספיק נתונים היסטוריים לניתוח מניה זו.\n(התקבלו {len(df)} שורות מ-Yahoo)"
 
         curr_price = df['Close'].iloc[-1]
         prev_price = df['Close'].iloc[-2]
@@ -230,11 +235,9 @@ def handle_message(message):
         print(f"Error scanning {ticker}: {e}", flush=True)
 
 if __name__ == "__main__":
-    # 1. הפעלת שרת ה-Web ברקע (ערוץ נפרד)
     server_thread = threading.Thread(target=run_server)
     server_thread.start()
 
-    # 2. שליחת הודעת התעוררות
     startup_msg = "🤖 *סורק המניות חזר לאוויר משרת הענן!*\nפשוט שלח לי סימול מניה."
     for chat_id in ALLOWED_CHAT_IDS:
         try:
