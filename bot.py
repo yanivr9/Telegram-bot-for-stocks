@@ -8,15 +8,11 @@ import threading
 import requests
 from flask import Flask
 
-# --- הגדרות אישיות (נמשכות כמשתני סביבה לאבטחה) ---
+# --- הגדרות אישיות ---
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 allowed_chats_env = os.environ.get("ALLOWED_CHAT_IDS", "")
 ALLOWED_CHAT_IDS = [chat_id.strip() for chat_id in allowed_chats_env.split(",") if chat_id.strip()]
 
-if not BOT_TOKEN:
-    print("⚠️ חסר משתנה סביבה: TELEGRAM_BOT_TOKEN")
-
-# --- הגדרות שרת (למניעת שינה) ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -27,13 +23,11 @@ def run_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# --- הגדרות אלגוריתם ---
 TOLERANCE_PCT = 0.015  
 BREAKOUT_PROXIMITY_PCT = 0.025 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- פונקציות ליבה ---
 def calculate_atr(df, period=14):
     try:
         high_low = df['High'] - df['Low']
@@ -49,12 +43,10 @@ def calculate_atr(df, period=14):
 def get_levels_with_hits(df):
     try:
         if len(df) < 60: return []
-        
         highs_series = df['High']
         lows_series = df['Low']
         maxima_idx = argrelextrema(highs_series.values, np.greater, order=20)[0]
         minima_idx = argrelextrema(lows_series.values, np.less, order=20)[0]
-        
         raw_levels = np.sort(np.concatenate((highs_series.iloc[maxima_idx].values, lows_series.iloc[minima_idx].values)))
         
         cleaned_levels = []
@@ -81,34 +73,45 @@ def get_levels_with_hits(df):
             
             final_hits_count = count_isolated_hits(hits_indices)
             if final_hits_count >= 2:
-                levels_data.append({
-                    'price': round(float(level), 2),
-                    'hits': final_hits_count
-                })
+                levels_data.append({'price': round(float(level), 2), 'hits': final_hits_count})
         return levels_data
     except Exception as e:
         return []
 
 def analyze_ticker_text(ticker):
     try:
-        # יצירת "תחפושת" לדפדפן כדי ש-Yahoo לא יחסום את שרת הענן
+        ticker = ticker.upper()
+        # התחפושת המושלמת של דפדפן כרום אמיתי
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,he;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0'
         })
         
-        stock = yf.Ticker(ticker.upper(), session=session)
+        # ניסיון ראשון
+        stock = yf.Ticker(ticker, session=session)
         df = stock.history(period="2y")
         
-        if len(df) < 100:
-            return f"❌ אין מספיק נתונים היסטוריים לניתוח מניה זו.\n(התקבלו {len(df)} שורות מ-Yahoo)"
+        # תוכנית גיבוי: אם יאהו חסמו את השיטה הרגילה (0 שורות), נשתמש במנגנון ההורדה הישיר
+        if df.empty or len(df) < 100:
+            df = yf.download(ticker, period="2y", progress=False)
+            # סידור הנתונים למקרה שההורדה מחזירה מבנה כפול
+            if not df.empty and isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-        curr_price = df['Close'].iloc[-1]
-        prev_price = df['Close'].iloc[-2]
-        curr_vol = df['Volume'].iloc[-1]
-        avg_vol_20 = df['Volume'].iloc[-21:-1].mean()
+        if df.empty or len(df) < 100:
+            return f"❌ יאהו חוסם את הבקשה כרגע או שאין מספיק נתונים. (התקבלו {len(df)} שורות).\nנסה שוב בעוד כמה דקות."
+
+        curr_price = float(df['Close'].iloc[-1])
+        prev_price = float(df['Close'].iloc[-2])
+        curr_vol = float(df['Volume'].iloc[-1])
+        avg_vol_20 = float(df['Volume'].iloc[-21:-1].mean())
         
-        # --- בדיקת סטטוס שוק ומחירים מחוץ לשעות ---
         extended_price = None
         extended_label = ""
         is_market_open = False
@@ -116,26 +119,23 @@ def analyze_ticker_text(ticker):
         try:
             info = stock.info
             market_state = info.get('marketState', '').upper()
-            
             live_price = info.get('currentPrice')
             if live_price:
-                curr_price = live_price
+                curr_price = float(live_price)
 
             if market_state == 'REGULAR':
                 is_market_open = True
             else:
                 pre_market = info.get('preMarketPrice')
                 post_market = info.get('postMarketPrice')
-                
                 if pre_market:
-                    extended_price = pre_market
+                    extended_price = float(pre_market)
                     extended_label = "טרום מסחר"
                 elif post_market:
-                    extended_price = post_market
+                    extended_price = float(post_market)
                     extended_label = "אחרי מסחר"
         except Exception:
             pass
-        # ------------------------------------------------
 
         all_levels = get_levels_with_hits(df)
         resistances = sorted([l for l in all_levels if l['price'] > curr_price], key=lambda x: x['price'])
@@ -159,9 +159,7 @@ def analyze_ticker_text(ticker):
         vol_ratio = (curr_vol / avg_vol_20) * 100
         vol_indicator = "🔥 ווליום חריג" if vol_ratio > 150 else "📊 ווליום רגיל"
 
-        # --- הרכבת ההודעה ---
-        report = f"📊 *דוח מניית {ticker.upper()}*\n\n"
-        
+        report = f"📊 *דוח מניית {ticker}*\n\n"
         report += "🔹 *נתונים כלליים*\n"
         
         if is_market_open:
@@ -199,12 +197,10 @@ def analyze_ticker_text(ticker):
     except Exception as e:
         return f"❌ שגיאה בניתוח המניה {ticker}: {e}"
 
-# --- האזנה להודעות נכנסות ---
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     if str(message.chat.id) not in ALLOWED_CHAT_IDS:
         bot.reply_to(message, "⛔ אין לך הרשאה להשתמש בבוט זה.")
-        print(f"Access denied for user: {message.chat.id}", flush=True)
         return
 
     text = message.text.strip().upper()
@@ -217,10 +213,8 @@ def handle_message(message):
     else:
         ticker = text
 
-    if not ticker:
-        return
+    if not ticker: return
 
-    print(f"Scanning ticker: {ticker}... (Requested by {message.chat.id})", flush=True)
     bot.reply_to(message, f"🔍 סורק את `{ticker}`, אנא המתן...")
     
     try:
@@ -229,10 +223,8 @@ def handle_message(message):
             bot.reply_to(message, report, parse_mode='Markdown')
         else:
             bot.reply_to(message, "❌ שגיאה: לא התקבל דוח מהפונקציה.")
-        print(f"Report for {ticker} sent successfully.", flush=True)
     except Exception as e:
         bot.reply_to(message, f"❌ אירעה שגיאה בשליחה: {e}")
-        print(f"Error scanning {ticker}: {e}", flush=True)
 
 if __name__ == "__main__":
     server_thread = threading.Thread(target=run_server)
@@ -245,5 +237,4 @@ if __name__ == "__main__":
         except:
             pass
 
-    print("Bot is running and listening...", flush=True)
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
